@@ -1,8 +1,8 @@
 # kisscloud-downloader
 
-Standalone downloader for drama series hosted on myasiantv.es via the
-kisscloud.online HLS player. Give it a series page URL and it downloads
-every episode, muxes Thai audio + English subtitles into an `.mkv`, and
+Standalone downloader for drama series and movies hosted on myasiantv.es
+via the kisscloud.online HLS player. Give it a series or movie page URL and it
+downloads the video(s), muxes Thai audio + English subtitles into an `.mkv`, and
 normalizes that episode's track metadata (audio language/default, subtitle
 language/default and format) as soon as it's muxed - no LLM or manual
 per-episode steps required.
@@ -32,9 +32,11 @@ if `ffprobe -version` fails).
 
 ```sh
 ./.venv/bin/python cli.py "https://ww19.myasiantv.es/tv/<series-slug>/" --output-dir ./downloads
+# Or a single movie:
+./.venv/bin/python cli.py "https://ww19.myasiantv.es/movies/<movie-slug>/" --output-dir ./downloads
 ```
 
-This produces:
+A series produces:
 
 ```
 downloads/
@@ -45,7 +47,15 @@ downloads/
         └── ...
 ```
 
-Re-running the same command skips any episode `.mkv` that already exists,
+A movie produces the same title/year directory with the movie directly inside it:
+
+```
+downloads/
+└── <movie_name>_(<year>)/
+    └── <movie_name>_(<year>).mkv
+```
+
+Re-running the same command skips any existing `.mkv` that already exists,
 so an interrupted run resumes cheaply instead of re-downloading everything.
 Since metadata is fixed per-episode as soon as it's muxed (see below), every
 episode already on disk is already Plex-ready - an interrupted run never
@@ -53,11 +63,10 @@ leaves a "downloaded but not yet fixed" episode behind.
 
 ## How it works
 
-1. **`discovery.py`** - loads the series page, parses the series name/year
+1. **`discovery.py`** - loads the series or movie page, parses the title/year
    out of the page `<title>` (format: `<Name> (<Year>) ...`), and collects
-   every `Episode N` link on the page that belongs to this series (filtered
-   by the show's own URL slug, since myasiantv also lists unrelated "related
-   shows" on the same page).
+   every `Episode N` link for a series. A movie page is represented as a
+   one-item URL list so the download pipeline remains shared.
 2. **`sniffer.py`** - loads each episode page in a headless browser and
    captures the kisscloud `video_id` (from the embedded iframe's `src`) and
    the stable `/cdn/hls/<hash>/master.txt` URL from network traffic. The

@@ -1,6 +1,8 @@
-"""Discovers a series' name, year, and ordered episode page URLs from its
-myasiantv.es show page (the /tv/<slug>/ page) or from any one of its
-individual episode pages (the /ep/<slug>/ page).
+"""Discovers a title, year, and page URLs from myasiantv.es.
+
+Series pages (the /tv/<slug>/ page) return their ordered episode URLs. Movie
+pages (the /movies/<slug>/ page) return the movie page itself as a one-item
+list, so callers can use the same discovery/download pipeline for both.
 """
 import re
 from urllib.parse import urlparse
@@ -18,6 +20,12 @@ EPISODE_NUM_RE = re.compile(r"Episode\s*(\d+)", re.IGNORECASE)
 # has no suffix at all). Match on the slug up through the year instead of
 # the full trailing slug.
 CORE_SLUG_RE = re.compile(r"^(.*-\d{4})(?:-[a-z]{1,3})?$")
+
+
+def is_movie_url(url):
+    """Whether *url* is a myasiantv movie page."""
+    parts = [p.lower() for p in urlparse(url).path.split("/") if p]
+    return bool(parts and parts[0] == "movies")
 
 
 def show_slug(show_url):
@@ -49,10 +57,9 @@ def slugify(name):
 def discover_series(show_url, timeout_ms=30000):
     """Returns (series_name, year, [episode_page_url, ...]) in ascending episode order.
 
-    Accepts either the show page (/tv/<slug>/) or an individual episode page
-    (/ep/<slug>/) - an episode page's own slug doesn't share a prefix with
-    its sibling episodes (each gets an independently-assigned disambiguation
-    suffix), so we follow its link back to the show page first.
+    Accepts a show page (/tv/<slug>/), an individual episode page
+    (/ep/<slug>/), or a movie page (/movies/<slug>/). A movie is returned as
+    one URL (it is not treated as a series with a fictional episode 1).
     """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -67,6 +74,10 @@ def discover_series(show_url, timeout_ms=30000):
             browser.close()
             raise RuntimeError(f"Could not parse series name/year from page title: {title!r}")
         series_name, year = m.group(1).strip(), m.group(2)
+
+        if is_movie_url(show_url):
+            browser.close()
+            return series_name, year, [show_url]
 
         if "/ep/" in urlparse(show_url).path:
             expected_text = f"{series_name} ({year})"

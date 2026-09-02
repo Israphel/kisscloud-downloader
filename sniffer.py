@@ -34,7 +34,11 @@ def sniff_episode(page_url, timeout_ms=30000):
         page = context.new_page()
         page.on("request", on_request)
 
-        page.goto(page_url, wait_until="networkidle", timeout=timeout_ms)
+        # Some movie pages keep analytics/advertising requests open forever,
+        # so waiting for networkidle can time out before the player is useful.
+        # The explicit wait below gives the player enough time to initialize
+        # while keeping the existing network-request sniffing behavior.
+        page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
         try:
             page.click("button.play, .play-button-outer, video", timeout=5000)
         except Exception:
