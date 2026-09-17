@@ -1,7 +1,7 @@
 # kisscloud-downloader
 
 Standalone downloader for drama series and movies hosted on myasiantv.es
-via the kisscloud.online HLS player. Give it a series or movie page URL and it
+via its KissCloud or Vidbasic HLS video providers. Give it a series or movie page URL and it
 downloads the video(s), muxes Thai audio + English subtitles into an `.mkv`, and
 normalizes that episode's track metadata (audio language/default, subtitle
 language/default and format) as soon as it's muxed - no LLM or manual
@@ -9,12 +9,12 @@ per-episode steps required.
 
 ## Why this exists
 
-myasiantv.es episode pages embed a kisscloud player whose stream URLs are
-signed, tokenized, and obfuscated (fake `.html`/`.js`/`.css` extensions on
-what are actually HLS segments) - `yt-dlp` doesn't support the site, and
-ffmpeg refuses to open the segment URLs directly. This tool sniffs the
-kisscloud iframe with a real (headless) browser to capture the stable
-identifiers it needs, then does the actual segment fetching/muxing itself.
+myasiantv.es episode pages embed third-party players whose stream URLs are
+signed, tokenized, encrypted, and sometimes served behind fake `.html`/`.js`/`.css`
+extensions. `yt-dlp` doesn't support the site, and ffmpeg refuses to open some
+of the segment URLs directly. This tool detects the provider in a real
+(headless) browser, extracts the provider's current media source, then reuses
+the same segment fetching/muxing pipeline for both providers.
 
 ## Setup
 
@@ -68,15 +68,15 @@ leaves a "downloaded but not yet fixed" episode behind.
    every `Episode N` link for a series. A movie page is represented as a
    one-item URL list so the download pipeline remains shared.
 2. **`sniffer.py`** - loads each episode page in a headless browser and
-   captures the kisscloud `video_id` (from the embedded iframe's `src`) and
-   the stable `/cdn/hls/<hash>/master.txt` URL from network traffic. The
-   actual `/m3/...` stream URLs in that request stream rotate/expire within
-   minutes, so only the stable master.txt reference is kept.
-3. **`streaming.py`** - re-resolves fresh stream tokens from master.txt at
-   download time, fetches the English subtitle from kisscloud's player API,
-   downloads video/audio segments concurrently over `curl`, joins them with
-   `ffmpeg concat`, and muxes video + audio + subtitle into the final `.mkv`.
-4. **`metadata.py`** - immediately after each episode is muxed, validates and
+   detects the embedded provider. KissCloud returns a stable `video_id` and
+   `master.txt` reference; Vidbasic's JWPlayer exposes a current HLS source and
+   subtitle URL after the player initializes. Vidbasic subtitle cues are
+   decrypted in the browser context using the player-provided CryptoJS setup.
+4. **`streaming.py`** - downloads provider-independent HLS segments concurrently
+   over `curl` (including HLS byte-range segments), selects the highest-bandwidth
+   variant when a provider returns a master playlist, joins segments with
+   `ffmpeg` concat, and muxes video/audio/subtitle tracks into the final `.mkv`.
+5. **`metadata.py`** - immediately after each episode is muxed, validates and
    (if needed) remuxes that `.mkv` so Thai audio is marked as the default
    track and English subtitles are marked default (not forced) and
    transcoded to SRT. This last part matters: most Plex clients (and
