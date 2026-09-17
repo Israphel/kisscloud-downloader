@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -30,8 +31,12 @@ def fetch_text(referer, url):
     return subprocess.run(curl_headers(referer) + [url], capture_output=True, check=True).stdout.decode()
 
 
-def fetch_binary(referer, url):
-    return subprocess.run(curl_headers(referer) + [url], capture_output=True, check=True).stdout
+def fetch_binary(referer, url, byte_range=None):
+    command = curl_headers(referer)
+    if byte_range:
+        start, end = byte_range
+        command += ["-H", f"Range: bytes={start}-{end}"]
+    return subprocess.run(command + [url], capture_output=True, check=True).stdout
 
 
 def resolve_streams(referer, master_txt_url):
@@ -69,6 +74,27 @@ def resolve_streams(referer, master_txt_url):
     return "https://kisscloud.online" + best_uri, audio
 
 
+def resolve_best_variant(referer, playlist_url):
+    """Select the highest-bandwidth variant when a provider returns a master playlist."""
+    text = fetch_text(referer, playlist_url)
+    lines = text.splitlines()
+    variants = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line.startswith("#EXT-X-STREAM-INF:") or i + 1 >= len(lines):
+            continue
+        bandwidth = re.search(r"BANDWIDTH=(\d+)", line)
+        if not bandwidth:
+            continue
+        resolution = re.search(r"RESOLUTION=([0-9x]+)", line)
+        variants.append((int(bandwidth.group(1)), resolution.group(1) if resolution else None,
+                         urljoin(playlist_url, lines[i + 1].strip())))
+    if not variants:
+        return playlist_url, None, None
+    bandwidth, resolution, variant_url = max(variants, key=lambda item: item[0])
+    return variant_url, resolution, bandwidth
+
+
 def resolve_subtitle(referer, video_id):
     """Subtitle URLs are signed/tokenized like the stream URLs, so fetch a fresh
     one from the kisscloud player API right before use instead of storing it."""
@@ -91,12 +117,12 @@ def resolve_subtitle(referer, video_id):
 
 
 def download_segment(args):
-    idx, url, path, referer = args
+    idx, url, path, referer, byte_range = args
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return idx
     for attempt in range(3):
         try:
-            data = fetch_binary(referer, url)
+            data = fetch_binary(referer, url, byte_range)
             with open(path, 'wb') as f:
                 f.write(data)
             return idx
@@ -109,10 +135,32 @@ def download_segment(args):
 def download_stream(name, m3u8_url, seg_dir, scratchpad, referer):
     os.makedirs(seg_dir, exist_ok=True)
     text = fetch_text(referer, m3u8_url)
-    segments = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith('#')]
+    segments = []
+    pending_range = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#EXT-X-BYTERANGE:"):
+            value = line.split(":", 1)[1]
+            length, _, offset = value.partition("@")
+            if offset:
+                start = int(offset)
+            elif segments:
+                _, previous_end = segments[-1][1] or (0, -1)
+                start = previous_end + 1
+            else:
+                start = 0
+            pending_range = (start, start + int(length) - 1)
+        elif not line.startswith("#"):
+            segments.append((urljoin(m3u8_url, line), pending_range))
+            pending_range = None
     total = len(segments)
     print(f"[{name}] {total} segments", flush=True)
-    tasks = [(i, url, os.path.join(seg_dir, f"{i:05d}.ts"), referer) for i, url in enumerate(segments)]
+    tasks = [
+        (i, url, os.path.join(seg_dir, f"{i:05d}.ts"), referer, byte_range)
+        for i, (url, byte_range) in enumerate(segments)
+    ]
     done = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         for _ in as_completed(ex.submit(download_segment, t) for t in tasks):
@@ -131,13 +179,24 @@ def download_stream(name, m3u8_url, seg_dir, scratchpad, referer):
 
 
 def mux_episode(video_ts, audio_ts, sub_path, out_mkv):
+    """Mux either separate video/audio streams or one combined media stream."""
     tmp_mkv = out_mkv + ".tmp.mkv"
+    inputs = ["-i", video_ts]
+    maps = ["-map", "0:v"]
+    metadata = []
+    if audio_ts:
+        inputs += ["-i", audio_ts]
+        maps += ["-map", "1:a"]
+        metadata += ["-disposition:a:0", "default", "-metadata:s:a:0", "language=tha"]
+    else:
+        maps += ["-map", "0:a?"]
+        metadata += ["-disposition:a:0", "default", "-metadata:s:a:0", "language=tha"]
+    if sub_path:
+        inputs += ["-i", sub_path]
+        maps += ["-map", f"{2 if audio_ts else 1}"]
+        metadata += ["-disposition:s:0", "default", "-metadata:s:s:0", "language=eng"]
     subprocess.run([
-        "ffmpeg", "-y",
-        "-i", video_ts, "-i", audio_ts, "-i", sub_path,
-        "-map", "0:v", "-map", "1:a", "-map", "2", "-c", "copy",
-        "-disposition:v:0", "default", "-disposition:a:0", "default", "-disposition:s:0", "default",
-        "-metadata:s:a:0", "language=tha", "-metadata:s:s:0", "language=eng",
-        tmp_mkv,
+        "ffmpeg", "-y", *inputs, *maps, "-c", "copy",
+        "-disposition:v:0", "default", *metadata, tmp_mkv,
     ], check=True)
     os.rename(tmp_mkv, out_mkv)

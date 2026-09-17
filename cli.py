@@ -43,27 +43,52 @@ def download_episode(ep_num, page_url, output_dir, scratchpad_root, series_slug,
         return
 
     print(f"==> {item_label}: sniffing {page_url}", flush=True)
-    video_id, master_txt = sniffer.sniff_episode(page_url)
-    referer = f"https://kisscloud.online/video/{video_id}"
+    source = sniffer.sniff_episode(page_url)
+    referer = source.referer
 
     scratchpad.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"==> {item_label}: resolving fresh stream tokens from master.txt", flush=True)
-    video_m3u8, audio_m3u8 = streaming.resolve_streams(referer, master_txt)
+    if source.provider == "kisscloud":
+        print(f"==> {item_label}: resolving fresh KissCloud stream tokens", flush=True)
+        video_m3u8, audio_m3u8 = streaming.resolve_streams(referer, source.master_txt_url)
+        video_ts = streaming.download_stream(
+            "video", video_m3u8, str(scratchpad / "segs_video"), str(scratchpad), referer
+        )
+        audio_ts = streaming.download_stream(
+            "audio", audio_m3u8, str(scratchpad / "segs_audio"), str(scratchpad), referer
+        )
+        sub_url = streaming.resolve_subtitle(referer, source.video_id)
+    elif source.provider == "vidbasic":
+        print(f"==> {item_label}: resolving Vidbasic HLS variants", flush=True)
+        media_url, resolution, bandwidth = streaming.resolve_best_variant(referer, source.media_url)
+        if resolution:
+            print(f"  Selected highest-bandwidth video variant: {resolution} ({bandwidth} bps)", flush=True)
+        else:
+            print("  Vidbasic returned a single media playlist", flush=True)
+        video_ts = streaming.download_stream(
+            "media", media_url, str(scratchpad / "segs_media"), str(scratchpad), referer
+        )
+        audio_ts = None
+        sub_url = source.subtitle_url
+    else:
+        raise RuntimeError(f"{item_label}: unsupported video provider {source.provider!r}")
 
-    print(f"==> {item_label}: resolving fresh subtitle URL", flush=True)
-    sub_url = streaming.resolve_subtitle(referer, video_id)
-    sub_data = streaming.fetch_binary(referer, sub_url)
-    if not sub_data.lstrip().startswith(b"WEBVTT"):
-        raise RuntimeError(f"{item_label}: subtitle fetch did not return WebVTT (got {sub_data[:80]!r})")
-    sub_path = scratchpad / "en.vtt"
-    sub_path.write_bytes(sub_data)
+    sub_path = None
+    if source.subtitle_data:
+        sub_data = source.subtitle_data.encode()
+    elif sub_url:
+        print(f"==> {item_label}: resolving subtitle", flush=True)
+        sub_data = streaming.fetch_binary(referer, sub_url)
+    else:
+        sub_data = None
+    if sub_data is not None:
+        if not sub_data.lstrip().startswith(b"WEBVTT"):
+            raise RuntimeError(f"{item_label}: subtitle fetch did not return WebVTT (got {sub_data[:80]!r})")
+        sub_path = scratchpad / "en.vtt"
+        sub_path.write_bytes(sub_data)
 
-    video_ts = streaming.download_stream("video", video_m3u8, str(scratchpad / "segs_video"), str(scratchpad), referer)
-    audio_ts = streaming.download_stream("audio", audio_m3u8, str(scratchpad / "segs_audio"), str(scratchpad), referer)
-
-    streaming.mux_episode(video_ts, audio_ts, str(sub_path), str(out_mkv))
+    streaming.mux_episode(video_ts, audio_ts, str(sub_path) if sub_path else None, str(out_mkv))
     shutil.rmtree(scratchpad, ignore_errors=True)
     metadata.fix_file(out_mkv)
     print(f"==> {item_label}: done -> {out_mkv}", flush=True)
