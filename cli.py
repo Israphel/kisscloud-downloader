@@ -17,6 +17,7 @@ No LLM involved at run time - this only reuses the myasiantv/kisscloud
 integration built while doing that process manually.
 """
 import argparse
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ import discovery
 import metadata
 import sniffer
 import streaming
+
+
+SRT_CUE_RE = re.compile(rb"\d+\r?\n\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->")
 
 
 def download_episode(ep_num, page_url, output_dir, scratchpad_root, series_slug, year,
@@ -83,9 +87,16 @@ def download_episode(ep_num, page_url, output_dir, scratchpad_root, series_slug,
     else:
         sub_data = None
     if sub_data is not None:
-        if not sub_data.lstrip().startswith(b"WEBVTT"):
-            raise RuntimeError(f"{item_label}: subtitle fetch did not return WebVTT (got {sub_data[:80]!r})")
-        sub_path = scratchpad / "en.vtt"
+        # Some sources serve SRT instead of WebVTT; ffmpeg reads both and
+        # metadata.fix_file() normalizes the track to SRT either way.
+        stripped = sub_data.lstrip(b"\xef\xbb\xbf \t\r\n")
+        if stripped.startswith(b"WEBVTT"):
+            sub_ext = "vtt"
+        elif SRT_CUE_RE.match(stripped):
+            sub_ext = "srt"
+        else:
+            raise RuntimeError(f"{item_label}: subtitle fetch did not return WebVTT or SRT (got {sub_data[:80]!r})")
+        sub_path = scratchpad / f"en.{sub_ext}"
         sub_path.write_bytes(sub_data)
 
     streaming.mux_episode(video_ts, audio_ts, str(sub_path) if sub_path else None, str(out_mkv))
@@ -116,17 +127,27 @@ def main():
 
 
     output_dir = output_root / f"{series_slug}_({year})"
-    if not movie:
-        output_dir /= "season01"
     scratchpad_root = output_root / f".tmp_{series_slug}_({year})"
 
     failed = []
-    for ep_num, page_url in enumerate(episode_urls, start=1):
+    for position, page_url in enumerate(episode_urls, start=1):
+        # The number in the source URL is the reference; fall back to position.
+        ep_num = position if movie else discovery.episode_number_from_url(page_url)
+        if ep_num is None:
+            ep_num = position
         item_label = "MOVIE" if movie else f"EP{ep_num:02d}"
         filename = f"{series_slug}_({year}).mkv" if movie else None
+        ep_output_dir = output_dir
+        if not movie:
+            if ep_num == 0:
+                # Plex specials: season00, numbered from e01.
+                ep_output_dir = output_dir / "season00"
+                filename = f"{series_slug}_({year})_s00e01.mkv"
+            else:
+                ep_output_dir = output_dir / "season01"
         try:
             download_episode(
-                ep_num, page_url, output_dir, scratchpad_root, series_slug, year,
+                ep_num, page_url, ep_output_dir, scratchpad_root, series_slug, year,
                 filename=filename, label=item_label if movie else None,
             )
         except Exception as e:

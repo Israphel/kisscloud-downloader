@@ -48,6 +48,19 @@ def episode_url_path_slug(href):
     return parts[-1] if parts else ""
 
 
+URL_EPISODE_NUM_RE = re.compile(r"-episode-(\d+)(?:-|$)")
+
+
+def episode_number_from_url(href):
+    """The episode number the source puts in the URL slug, or None.
+
+    e.g. '...-episode-0-english-subbed' -> 0. This is the reference for
+    naming: episode 0 is a special (Plex season 0), not episode 1.
+    """
+    m = URL_EPISODE_NUM_RE.search(episode_url_path_slug(href))
+    return int(m.group(1)) if m else None
+
+
 def slugify(name):
     """series name -> repo-style slug, e.g. 'Love beyond Dreams' -> 'love_beyond_dreams'."""
     s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")

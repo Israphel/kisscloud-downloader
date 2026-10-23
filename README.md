@@ -47,6 +47,10 @@ downloads/
         └── ...
 ```
 
+Episode numbers come from the source URL (`...-episode-N-...`). An "episode 0"
+is a special, so it goes to `season00/<series_name>_(<year>)_s00e01.mkv`
+(Plex's specials convention) instead of being counted as episode 1.
+
 A movie produces the same title/year directory with the movie directly inside it:
 
 ```
